@@ -1,167 +1,109 @@
-name: Deploy Medusa to AWS ECS
+name: Deploy Medusa Store to AWS ECS
 
 on:
   push:
-    branches: [ main, develop ]
-  pull_request:
-    branches: [ main ]
-
-env:
-  AWS_REGION: us-east-1
-  ECR_REPOSITORY: medusa-commerce
-  ECS_CLUSTER: medusa-commerce-cluster
-  ECS_SERVER_SERVICE: medusa-commerce-server-service
-  ECS_WORKER_SERVICE: medusa-commerce-worker-service
-  ECS_SERVER_TASK_DEFINITION: medusa-commerce-server
-  ECS_WORKER_TASK_DEFINITION: medusa-commerce-worker
+    branches:
+      - main
 
 jobs:
-  terraform:
-    name: 'Terraform Infrastructure'
+  deploy:
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-    
-    defaults:
-      run:
-        working-directory: ./terraform
 
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      # Step 1: Checkout the code
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Setup Terraform
-      uses: hashicorp/setup-terraform@v3
-      with:
-        terraform_version: 1.6.0
+      # Step 2: Set up Docker
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
+      # Step 3: Log in to Docker Hub
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
 
-    - name: Terraform Format Check
-      run: terraform fmt -check
+      # Step 4: Build the Docker image
+      - name: Build Docker image
+        run: |
+          docker build -t avimehndi/medusa-store:latest .
 
-    - name: Terraform Init
-      run: terraform init
+      # Step 5: Push Docker image to Docker Hub
+      - name: Push Docker image to Docker Hub
+        run: |
+          docker push avimehndi/medusa-store:latest
 
-    - name: Terraform Validate
-      run: terraform validate
+      # Step 6: Configure AWS credentials
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
 
-    - name: Terraform Plan
-      run: terraform plan -no-color
-      continue-on-error: true
+      # Step 7: Pull Docker image (for ECS)
+      - name: Pull Docker image from Docker Hub
+        run: |
+          docker pull avimehndi/medusa-store:latest
+          echo "Pulled image: avimehndi/medusa-store:latest"
 
-    - name: Terraform Apply
-      if: github.ref == 'refs/heads/main'
-      run: terraform apply -auto-approve
+      # Step 7.5: Register task definition if not already present
+      - name: Register ECS Task Definition (initial deployment)
+        run: |
+          aws ecs register-task-definition \
+          --region us-east-1 \
+          --cli-input-json file://ecs-task-def.json
 
-  build-and-deploy:
-    name: 'Build and Deploy Application'
-    runs-on: ubuntu-latest
-    needs: terraform
-    if: github.ref == 'refs/heads/main'
+      # Step 8: Update ECS task definition
+      - name: Update ECS task definition
+        id: update-task-def
+        run: |
+          TASK_DEF=$(aws ecs describe-task-definition \
+            --task-definition medusa-task \
+            --region us-east-1)
 
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+          NEW_TASK_DEF=$(echo "$TASK_DEF" | jq \
+            '.taskDefinition |
+            .containerDefinitions[0].image = "avimehndi/medusa-store:latest" |
+            del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)')
 
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
+          NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --region us-east-1 \
+            --cli-input-json "$NEW_TASK_DEF" \
+            | jq -r '.taskDefinition.taskDefinitionArn')
 
-    - name: Login to Amazon ECR
-      id: login-ecr
-      uses: aws-actions/amazon-ecr-login@v2
+          echo "task_definition_arn=$NEW_TASK_DEF_ARN" >> $GITHUB_OUTPUT
 
-    - name: Create ECR repository if it doesn't exist
-      run: |
-        aws ecr describe-repositories --repository-names $ECR_REPOSITORY || \
-        aws ecr create-repository --repository-name $ECR_REPOSITORY
 
-    - name: Build, tag, and push image to Amazon ECR
-      id: build-image
-      env:
-        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        IMAGE_TAG: ${{ github.sha }}
-      run: |
-        # Build the Docker image
-        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
-        
-        # Push the images to ECR
-        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-        docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
-        
-        # Output the image URI for use in subsequent steps
-        echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+      # Step 8.5: Create ECS Cluster if not exists
+      - name: Create ECS Cluster if not exists
+        run: |
+          CLUSTER_EXISTS=$(aws ecs describe-clusters --clusters medusa-cluster --region us-east-1 --query "clusters[?status=='ACTIVE'].clusterName" --output text)
+          if [ -z "$CLUSTER_EXISTS" ]; then
+            echo "Creating ECS Cluster: medusa-cluster"
+            aws ecs create-cluster --cluster-name medusa-cluster --region us-east-1
+          else
+            echo "ECS Cluster medusa-cluster already exists"
+          fi
 
-    - name: Update ECS task definitions
-      id: update-task-def
-      env:
-        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        IMAGE_TAG: ${{ github.sha }}
-      run: |
-        # Get current task definitions
-        aws ecs describe-task-definition --task-definition $ECS_SERVER_TASK_DEFINITION --query taskDefinition > server-task-definition.json
-        aws ecs describe-task-definition --task-definition $ECS_WORKER_TASK_DEFINITION --query taskDefinition > worker-task-definition.json
-        
-        # Update image URI in task definitions
-        jq --arg IMAGE_URI "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" '.containerDefinitions[0].image = $IMAGE_URI' server-task-definition.json > updated-server-task-definition.json
-        jq --arg IMAGE_URI "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" '.containerDefinitions[0].image = $IMAGE_URI' worker-task-definition.json > updated-worker-task-definition.json
-        
-        # Remove fields that are not needed for registration
-        jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .placementConstraints, .compatibilities, .registeredAt, .registeredBy)' updated-server-task-definition.json > final-server-task-definition.json
-        jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .placementConstraints, .compatibilities, .registeredAt, .registeredBy)' updated-worker-task-definition.json > final-worker-task-definition.json
+      # Step 9: Update ECS service
+      - name: Update ECS service
+        run: |
+          aws ecs update-service \
+            --cluster medusa-cluster \
+            --service medusa-service \
+            --task-definition ${{ steps.update-task-def.outputs.task_definition_arn }} \
+            --force-new-deployment \
+            --region us-east-1
+          echo "Updated ECS service"
 
-    - name: Deploy to Amazon ECS
-      run: |
-        # Register new task definitions
-        aws ecs register-task-definition --cli-input-json file://final-server-task-definition.json
-        aws ecs register-task-definition --cli-input-json file://final-worker-task-definition.json
-        
-        # Update services with new task definitions
-        aws ecs update-service --cluster $ECS_CLUSTER --service $ECS_SERVER_SERVICE --task-definition $ECS_SERVER_TASK_DEFINITION
-        aws ecs update-service --cluster $ECS_CLUSTER --service $ECS_WORKER_SERVICE --task-definition $ECS_WORKER_TASK_DEFINITION
-        
-        # Wait for services to reach stable state
-        aws ecs wait services-stable --cluster $ECS_CLUSTER --services $ECS_SERVER_SERVICE $ECS_WORKER_SERVICE
-
-    - name: Verify deployment
-      run: |
-        # Get the load balancer DNS name
-        LB_DNS=$(aws elbv2 describe-load-balancers --names medusa-commerce-alb --query 'LoadBalancers[0].DNSName' --output text)
-        echo "Load Balancer DNS: $LB_DNS"
-        
-        # Test health endpoint
-        echo "Testing health endpoint..."
-        curl -f http://$LB_DNS/health || echo "Health check failed"
-        
-        # Output deployment info
-        echo "Deployment completed successfully!"
-        echo "Application URL: http://$LB_DNS"
-        echo "Admin URL: http://$LB_DNS/app"
-
-  notify:
-    name: 'Notify Deployment Status'
-    runs-on: ubuntu-latest
-    needs: [terraform, build-and-deploy]
-    if: always()
-    
-    steps:
-    - name: Notify Success
-      if: needs.build-and-deploy.result == 'success'
-      run: |
-        echo "✅ Deployment successful!"
-        echo "Your Medusa application is now running on AWS ECS with Fargate."
-        
-    - name: Notify Failure
-      if: needs.build-and-deploy.result == 'failure'
-      run: |
-        echo "❌ Deployment failed!"
-        echo "Please check the logs above for troubleshooting information."
+      # Step 10: Wait for ECS service to stabilize
+      - name: Wait for ECS service to stabilize
+        run: |
+          aws ecs wait services-stable \
+            --cluster medusa-cluster \
+            --services medusa-service \
+            --region us-east-1
+          echo "ECS service is now stable"
