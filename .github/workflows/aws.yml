@@ -76,6 +76,18 @@ jobs:
 
           echo "task_definition_arn=$NEW_TASK_DEF_ARN" >> $GITHUB_OUTPUT
 
+
+      # Step 8.5: Create ECS Cluster if not exists
+      - name: Create ECS Cluster if not exists
+        run: |
+          CLUSTER_EXISTS=$(aws ecs describe-clusters --clusters medusa-cluster --region us-east-1 --query "clusters[?status=='ACTIVE'].clusterName" --output text)
+          if [ -z "$CLUSTER_EXISTS" ]; then
+            echo "Creating ECS Cluster: medusa-cluster"
+            aws ecs create-cluster --cluster-name medusa-cluster --region us-east-1
+          else
+            echo "ECS Cluster medusa-cluster already exists"
+          fi
+
       # Step 9: Update ECS service
       - name: Update ECS service
         run: |
