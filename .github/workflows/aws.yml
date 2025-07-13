@@ -49,6 +49,13 @@ jobs:
           docker pull avimehndi/medusa-store:latest
           echo "Pulled image: avimehndi/medusa-store:latest"
 
+      # Step 7.5: Register task definition if not already present
+      - name: Register ECS Task Definition (initial deployment)
+        run: |
+          aws ecs register-task-definition \
+          --region us-east-1 \
+          --cli-input-json file://ecs-task-def.json
+
       # Step 8: Update ECS task definition
       - name: Update ECS task definition
         id: update-task-def
