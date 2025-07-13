@@ -1,0 +1,22 @@
+{
+  "family": "medusa-task",
+  "networkMode": "awsvpc",
+  "containerDefinitions": [
+    {
+      "name": "medusa-store",
+      "image": "avimehndi/medusa-store:latest",
+      "portMappings": [
+        {
+          "containerPort": 3000,
+          "protocol": "tcp"
+        }
+      ],
+      "essential": true
+    }
+  ],
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "executionRoleArn": "arn:aws:iam::YOUR_ACCOUNT_ID:role/YOUR_ECS_EXECUTION_ROLE",
+  "taskRoleArn": "arn:aws:iam::YOUR_ACCOUNT_ID:role/YOUR_ECS_TASK_ROLE"
+}
